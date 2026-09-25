@@ -9,39 +9,45 @@ function sleep(ms) {
 }
 
 function isRetryable(error) {
-  // Retry timeout/abort errors
   if (error?.name === 'AbortError') {
     return true;
   }
 
-  // Retry network errors with no status
   if (error?.status == null) {
     return true;
   }
 
-  // Retry rate limiting
   if (error.status === 429) {
     return true;
   }
 
-  // Retry server errors
   if (error.status >= 500 && error.status <= 599) {
     return true;
   }
 
-  // Do not retry ordinary 4xx errors
   return false;
 }
 
 async function withTimeout(operation, timeoutMs) {
   const controller = new AbortController();
 
-  const timer = setTimeout(() => {
-    controller.abort();
-  }, timeoutMs);
+  let timer;
 
   try {
-    return await operation(controller.signal);
+    const timeoutPromise = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+
+        const error = new Error('Operation timed out');
+        error.name = 'AbortError';
+        reject(error);
+      }, timeoutMs);
+    });
+
+    return await Promise.race([
+      operation(controller.signal),
+      timeoutPromise,
+    ]);
   } finally {
     clearTimeout(timer);
   }
@@ -59,17 +65,14 @@ async function withRetry(operation, options = {}) {
     } catch (error) {
       lastError = error;
 
-      // Stop immediately for non-retryable errors
       if (!isRetryable(error)) {
         throw error;
       }
 
-      // No more attempts
       if (attempt === maxAttempts - 1) {
-        throw lastError;
+        throw error;
       }
 
-      // Exponential backoff
       const delay = baseDelayMs * 2 ** attempt;
       await sleep(delay);
     }
